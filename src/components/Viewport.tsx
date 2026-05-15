@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { Engine } from '../engine3d/Engine';
+import { StoreBridge } from '../core/engine/StoreBridge';
 
 export default function Viewport() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -7,7 +8,8 @@ export default function Viewport() {
   useEffect(() => {
     if (!containerRef.current) return;
 
-    const engine = new Engine(containerRef.current, {});
+    const api = new StoreBridge();
+    const engine = new Engine(containerRef.current, api, {});
 
     const initializeEngine = async () => {
       try {
@@ -23,6 +25,7 @@ export default function Viewport() {
     initializeEngine();
     return () => {
       engine.dispose();
+      api.dispose();
     };
   }, []);
 

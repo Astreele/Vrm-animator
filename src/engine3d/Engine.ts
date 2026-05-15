@@ -1,7 +1,6 @@
 import * as THREE from 'three/webgpu';
 import { VRMHumanBoneName } from '@pixiv/three-vrm';
 import { EventBus } from '../core/engine/EventBus';
-import { shallow } from 'zustand/shallow';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { SelectionSystem } from './systems/SelectionSystem';
 import { RendererSystem } from './systems/RendererSystem';
@@ -9,7 +8,7 @@ import { SceneSystem } from './systems/SceneSystem';
 import { CameraSystem } from './systems/CameraSystem';
 import { InputSystem } from './systems/InputSystem';
 import { VRMSystem } from './systems/VRMSystem';
-import { useEditorStore } from '../store/useEditorStore';
+import type { EngineAPI } from '../core/engine/EngineAPI';
 
 export interface EngineConfig {
   backgroundColor?: string | number;
@@ -20,6 +19,7 @@ export interface EngineConfig {
 export class Engine {
   private readonly clock: THREE.Clock;
   private readonly events: EventBus;
+  private readonly api: EngineAPI;
 
   private readonly rendererSystem: RendererSystem;
   private readonly sceneSystem: SceneSystem;
@@ -28,14 +28,19 @@ export class Engine {
   private readonly vrmSystem: VRMSystem;
   private readonly selectionSystem: SelectionSystem;
   private transformGizmo?: TransformControls;
-  private storeUnsubscribes: (() => void)[] = [];
+  private apiUnsubscribes: (() => void)[] = [];
   private resizeObserver?: ResizeObserver;
   private isDisposed: boolean = false;
-  private gizmoDragging = false;
+  private gizmoDragging: boolean = false;
 
-  constructor(container: HTMLDivElement, config: EngineConfig = {}) {
+  constructor(
+    container: HTMLDivElement,
+    api: EngineAPI,
+    config: EngineConfig = {},
+  ) {
     this.clock = new THREE.Clock();
     this.events = new EventBus();
+    this.api = api;
 
     this.rendererSystem = new RendererSystem(container, this.events);
     this.sceneSystem = new SceneSystem(config);
@@ -50,7 +55,7 @@ export class Engine {
     this.setupGizmo();
     this.setupResizeObserver(container);
     this.bindEvents();
-    this.bindStoreSubscriptions();
+    this.bindAPISubscriptions();
   }
 
   private setupResizeObserver(container: HTMLDivElement): void {
@@ -92,8 +97,7 @@ export class Engine {
     });
 
     this.events.on('engine:boneSelected', ({ boneName }) => {
-      const store = useEditorStore.getState();
-      store.selectBone(boneName);
+      this.api.selectBone(boneName);
 
       if (boneName) {
         const vrm = this.vrmSystem.currentVrm;
@@ -122,6 +126,7 @@ export class Engine {
   }
 
   public async loadModel(url: string): Promise<void> {
+    await this.api.loadModel(url);
     await this.vrmSystem.load(url);
   }
 
@@ -142,49 +147,42 @@ export class Engine {
     this.sceneSystem.scene.add(this.transformGizmo.getHelper());
   }
 
-  private bindStoreSubscriptions(): void {
-    const unsubTime = useEditorStore.subscribe(
-      (state) => state.currentTime,
-      (time) => this.events.emit('engine:timeChanged', { time }),
+  private bindAPISubscriptions(): void {
+    const unsubTime = this.api.onTimeChanged((time) =>
+      this.events.emit('engine:timeChanged', { time }),
     );
-    const unsubPlay = useEditorStore.subscribe(
-      (state) => state.playing,
-      (playing) => this.events.emit('engine:playStateChanged', { playing }),
+    const unsubPlay = this.api.onPlayStateChanged((playing) =>
+      this.events.emit('engine:playStateChanged', { playing }),
     );
-    const unsubSelection = useEditorStore.subscribe(
-      (state) => ({
-        id: state.selectedEntityId,
-        bone: state.selectedBoneName,
+    this.api.onSelectionChanged((boneName) =>
+      this.events.emit('engine:selectionChanged', {
+        entityId: null,
+        boneName,
       }),
-      (selection) =>
-        this.events.emit('engine:selectionChanged', {
-          entityId: selection.id,
-          boneName: selection.bone,
-        }),
-      { equalityFn: shallow },
     );
-    this.storeUnsubscribes.push(unsubTime, unsubPlay, unsubSelection);
+    this.apiUnsubscribes.push(unsubTime, unsubPlay);
   }
 
   private tick(): void {
     const delta = this.clock.getDelta();
-    const store = useEditorStore.getState();
-    const { playing, currentTime, fps, tracks } = store;
-    let targetTime = currentTime;
+    const playing = this.api.playing;
+    let targetTime = this.api.currentTime;
 
     if (playing) {
       targetTime += delta;
 
-      const { endFrame, startFrame } = store;
+      const fps = this.api.fps;
+      const startFrame = this.api.startFrame;
+      const endFrame = this.api.endFrame;
       const maxTime = endFrame / fps;
       const minTime = startFrame / fps;
       if (targetTime > maxTime) targetTime = minTime;
 
-      store.setCurrentTime(targetTime);
+      this.api.setTime(targetTime);
     }
 
     this.cameraSystem.update();
-    this.vrmSystem.update(delta, targetTime, tracks);
+    this.vrmSystem.update(delta, targetTime, this.api.tracks);
     this.sceneSystem.updateGrid(this.cameraSystem.controller.camera.position);
 
     this.rendererSystem.render(
@@ -195,7 +193,7 @@ export class Engine {
 
   public dispose(): void {
     this.isDisposed = true;
-    this.storeUnsubscribes.forEach((unsub) => unsub());
+    this.apiUnsubscribes.forEach((unsub) => unsub());
     this.resizeObserver?.disconnect();
 
     if (this.transformGizmo) {
